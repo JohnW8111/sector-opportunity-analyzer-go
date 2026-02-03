@@ -65,15 +65,8 @@ func main() {
 	// Health check
 	r.Get("/health", api.HealthHandler)
 
-	// Root endpoint
+	// Root endpoint - always serve frontend HTML
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		// Check if Accept header wants JSON
-		accept := r.Header.Get("Accept")
-		if strings.Contains(accept, "application/json") {
-			api.RootHandler(w, r)
-			return
-		}
-		// Otherwise serve the frontend
 		serveStaticFile(w, r, "index.html")
 	})
 
