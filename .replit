@@ -1,0 +1,12 @@
+run = "./sector-analyzer"
+
+[nix]
+channel = "stable-23_11"
+
+[deployment]
+run = ["./sector-analyzer"]
+build = ["go", "build", "-o", "sector-analyzer", "."]
+
+[[ports]]
+localPort = 8000
+externalPort = 80
