@@ -101,10 +101,27 @@ GET /health
   Returns service health status
 ```
 
+## Caching
+
+The server uses an **in-memory cache** with the following characteristics:
+
+| Property | Value |
+|----------|-------|
+| Location | Server-side (in-process) |
+| TTL | 12 hours |
+| Scope | Shared across all requests |
+| Persistence | None (clears on restart) |
+
+Cache endpoints:
+- `GET /api/cache/info` — View cache statistics (hit/miss counts, entry ages)
+- `POST /api/cache/clear` — Clear all cached data (useful after config changes)
+
+The cache significantly reduces API calls to Yahoo Finance, FRED, and BLS, improving response times from ~2-5s (cold) to ~50ms (cached).
+
 ## Architecture
 
 ```
-sector-analyzer-go/
+sector-opportunity-analyzer-go/
 ├── main.go              # Entry point, HTTP server, static file serving
 ├── config/
 │   └── config.go        # Sector definitions, weights, API configs
@@ -128,9 +145,15 @@ sector-analyzer-go/
    - ETF info (P/E ratios, yields)
 
 2. **FRED** (Federal Reserve Economic Data)
-   - Treasury rates (DGS10, DGS2)
-   - CPI inflation data
-   - GDP
+
+   | Series ID | Description |
+   |-----------|-------------|
+   | DGS10 | 10-Year Treasury Constant Maturity Rate |
+   | DGS2 | 2-Year Treasury Constant Maturity Rate |
+   | CPIAUCSL | Consumer Price Index (All Urban Consumers) |
+   | GDP | Gross Domestic Product |
+   | UNRATE | Unemployment Rate |
+   | FEDFUNDS | Federal Funds Effective Rate |
 
 3. **BLS** (Bureau of Labor Statistics)
    - Employment by sector
@@ -163,27 +186,29 @@ sector-analyzer-go/
 
 ## Deployment on Replit
 
-```nix
-# replit.nix
-{ pkgs }: {
-  deps = [
-    pkgs.go
-  ];
-}
-```
+Use the **modules** system (not legacy nix). This is the working configuration:
 
 ```toml
 # .replit
-run = "./sector-analyzer"
+run = "go build -o sector-analyzer . && ./sector-analyzer"
+modules = ["go-1.21"]
 
-[nix]
-channel = "stable-23_11"
+[deployment]
+run = ["sh", "-c", "go build -o sector-analyzer . && ./sector-analyzer"]
+
+[deployment.healthCheck]
+path = "/health"
+
+[[ports]]
+localPort = 8000
+externalPort = 80
 ```
 
-Build command:
-```bash
-go build -o sector-analyzer .
-```
+**Important notes:**
+- Build and run must be combined because deployment uses separate containers
+- The binary from a build phase doesn't persist to the run phase
+- Don't mix `modules` with `[nix]` block—use one or the other
+- Health check must point to `/health`, not `/`
 
 The binary serves both the API and frontend from a single process, eliminating the startup race conditions and multi-process overhead of the Python+Node version.
 
