@@ -1,12 +1,13 @@
-run = "./sector-analyzer"
+ run = "go build -o sector-analyzer . && ./sector-analyzer"              
+  modules = ["go-1.21"]                                          
+                                                                     
+  [deployment]                                                       
+  run = ["sh", "-c", "go build -o sector-analyzer . && ./sector-analyzer"]
+  deploymentTarget = "cloudrun"                                      
+                                                                     
+  [deployment.healthCheck]                                                
+  path = "/health"
 
-[nix]
-channel = "stable-23_11"
-
-[deployment]
-run = ["./sector-analyzer"]
-build = ["go", "build", "-o", "sector-analyzer", "."]
-
-[[ports]]
-localPort = 8000
-externalPort = 80
+  [[ports]]
+  localPort = 8000
+  externalPort = 80
