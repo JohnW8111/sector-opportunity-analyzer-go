@@ -138,6 +138,64 @@ func fetchYahooHistory(ticker string, period string) (PriceSeries, error) {
 	return series, nil
 }
 
+// yahooCrumb holds a reusable cookie+crumb pair for Yahoo Finance API auth.
+type yahooCrumb struct {
+	cookies []*http.Cookie
+	crumb   string
+}
+
+// getYahooCrumb fetches a fresh cookie+crumb pair from Yahoo Finance.
+func getYahooCrumb() (*yahooCrumb, error) {
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		// Don't follow redirects automatically so we can capture cookies
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// Step 1: Get consent cookie from fc.yahoo.com
+	req, _ := http.NewRequest("GET", "https://fc.yahoo.com/cusc/t", nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Yahoo cookie: %w", err)
+	}
+	resp.Body.Close()
+
+	cookies := resp.Cookies()
+	if len(cookies) == 0 {
+		return nil, fmt.Errorf("no cookies returned from Yahoo")
+	}
+
+	// Step 2: Get crumb using the cookie
+	// Use a client that follows redirects for this step
+	crumbClient := &http.Client{Timeout: 15 * time.Second}
+	req, _ = http.NewRequest("GET", "https://query2.finance.yahoo.com/v1/test/getcrumb", nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+
+	resp, err = crumbClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Yahoo crumb: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read crumb response: %w", err)
+	}
+
+	crumb := strings.TrimSpace(string(body))
+	if crumb == "" || strings.Contains(crumb, "Too Many") || strings.Contains(crumb, "Unauthorized") {
+		return nil, fmt.Errorf("invalid crumb response: %s", crumb)
+	}
+
+	return &yahooCrumb{cookies: cookies, crumb: crumb}, nil
+}
+
 // FetchSectorInfo retrieves current info (P/E, etc.) for all sector ETFs.
 func FetchSectorInfo() (map[string]SectorInfo, error) {
 	cacheKey := GenerateKey("yfinance", map[string]interface{}{"type": "sector_info"})
@@ -145,34 +203,52 @@ func FetchSectorInfo() (map[string]SectorInfo, error) {
 		return cached.(map[string]SectorInfo), nil
 	}
 
+	// Get cookie+crumb for authenticated requests
+	auth, err := getYahooCrumb()
+	if err != nil {
+		fmt.Printf("Warning: Could not authenticate with Yahoo Finance: %v\n", err)
+		fmt.Println("Sector P/E data will be unavailable.")
+		info := make(map[string]SectorInfo)
+		for sector := range config.SectorETFs {
+			info[sector] = SectorInfo{}
+		}
+		return info, nil
+	}
+
 	info := make(map[string]SectorInfo)
 
 	for sector, ticker := range config.SectorETFs {
-		sectorInfo, err := fetchYahooInfo(ticker)
+		sectorInfo, err := fetchYahooInfo(ticker, auth)
 		if err != nil {
-			fmt.Printf("Error fetching info for %s: %v\n", ticker, err)
+			fmt.Printf("Error fetching info for %s (%s): %v\n", sector, ticker, err)
 			info[sector] = SectorInfo{}
 			continue
 		}
 		info[sector] = sectorInfo
+		// Small delay to avoid rate limiting
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	GlobalCache.Set(cacheKey, info)
 	return info, nil
 }
 
-// fetchYahooInfo retrieves ETF info from Yahoo Finance.
-func fetchYahooInfo(ticker string) (SectorInfo, error) {
+// fetchYahooInfo retrieves ETF info from Yahoo Finance using cookie+crumb auth.
+func fetchYahooInfo(ticker string, auth *yahooCrumb) (SectorInfo, error) {
 	apiURL := fmt.Sprintf(
-		"https://query1.finance.yahoo.com/v10/finance/quoteSummary/%s?modules=summaryDetail,defaultKeyStatistics",
+		"https://query2.finance.yahoo.com/v10/finance/quoteSummary/%s?modules=summaryDetail,defaultKeyStatistics&crumb=%s",
 		url.PathEscape(ticker),
+		url.QueryEscape(auth.crumb),
 	)
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return SectorInfo{}, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+	for _, c := range auth.cookies {
+		req.AddCookie(c)
+	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -182,7 +258,7 @@ func fetchYahooInfo(ticker string) (SectorInfo, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return SectorInfo{}, fmt.Errorf("yahoo finance returned status %d", resp.StatusCode)
+		return SectorInfo{}, fmt.Errorf("yahoo finance returned status %d for %s", resp.StatusCode, ticker)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -213,6 +289,11 @@ func fetchYahooInfo(ticker string) (SectorInfo, error) {
 	if result.SummaryDetail.TrailingPE.Raw > 0 {
 		pe := result.SummaryDetail.TrailingPE.Raw
 		info.TrailingPE = &pe
+	}
+
+	// If no ForwardPE available, use TrailingPE as fallback
+	if info.ForwardPE == nil && info.TrailingPE != nil {
+		info.ForwardPE = info.TrailingPE
 	}
 
 	if result.SummaryDetail.DividendYield.Raw > 0 {

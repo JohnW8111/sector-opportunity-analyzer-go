@@ -254,6 +254,7 @@ type DataQualityResponse struct {
 }
 
 // GetDataQualityHandler handles GET /api/data/quality
+// Deep validation: checks that data is not just present but actually usable.
 func GetDataQualityHandler(w http.ResponseWriter, r *http.Request) {
 	allData := appState.GetData()
 
@@ -277,14 +278,34 @@ func GetDataQualityHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check Yahoo Finance (prices)
-	if len(allData.SectorPrices) >= 10 {
+	// Check Yahoo Finance: prices AND PE data
+	priceSectors := 0
+	peSectors := 0
+	for sector, series := range allData.SectorPrices {
+		if sector == "_benchmark" {
+			continue
+		}
+		if len(series) >= 20 {
+			priceSectors++
+		}
+	}
+	for _, info := range allData.SectorInfo {
+		if info.ForwardPE != nil || info.TrailingPE != nil {
+			peSectors++
+		}
+	}
+
+	if priceSectors >= 10 && peSectors >= 8 {
 		sources[0].Status = "ok"
-		msg := fmt.Sprintf("%d sectors loaded", len(allData.SectorPrices)-1) // -1 for benchmark
+		msg := fmt.Sprintf("%d sectors with prices, %d with P/E data", priceSectors, peSectors)
 		sources[0].Message = &msg
-	} else if len(allData.SectorPrices) > 0 {
+	} else if priceSectors >= 10 && peSectors == 0 {
 		sources[0].Status = "warning"
-		msg := fmt.Sprintf("Only %d sectors loaded", len(allData.SectorPrices))
+		msg := fmt.Sprintf("%d sectors with prices, but P/E data unavailable", priceSectors)
+		sources[0].Message = &msg
+	} else if priceSectors > 0 {
+		sources[0].Status = "warning"
+		msg := fmt.Sprintf("Only %d sectors with prices, %d with P/E data", priceSectors, peSectors)
 		sources[0].Message = &msg
 	} else {
 		sources[0].Status = "error"
@@ -292,14 +313,27 @@ func GetDataQualityHandler(w http.ResponseWriter, r *http.Request) {
 		sources[0].Message = &msg
 	}
 
-	// Check FRED (macro data)
-	if len(allData.MacroData) >= 3 {
+	// Check FRED: series must have recent data (within 90 days)
+	fredTotal := len(allData.MacroData)
+	fredRecent := 0
+	cutoff := time.Now().AddDate(0, 0, -90)
+	for _, ts := range allData.MacroData {
+		if len(ts.Dates) > 0 && ts.Dates[len(ts.Dates)-1].After(cutoff) {
+			fredRecent++
+		}
+	}
+
+	if fredTotal >= 3 && fredRecent >= 3 {
 		sources[1].Status = "ok"
-		msg := fmt.Sprintf("%d series loaded", len(allData.MacroData))
+		msg := fmt.Sprintf("%d/%d series with recent data", fredRecent, fredTotal)
 		sources[1].Message = &msg
-	} else if len(allData.MacroData) > 0 {
+	} else if fredTotal > 0 && fredRecent > 0 {
 		sources[1].Status = "warning"
-		msg := fmt.Sprintf("Only %d series loaded", len(allData.MacroData))
+		msg := fmt.Sprintf("Only %d/%d series have recent data", fredRecent, fredTotal)
+		sources[1].Message = &msg
+	} else if fredTotal > 0 {
+		sources[1].Status = "warning"
+		msg := fmt.Sprintf("%d series loaded but none have recent data", fredTotal)
 		sources[1].Message = &msg
 	} else {
 		sources[1].Status = "warning"
@@ -307,14 +341,26 @@ func GetDataQualityHandler(w http.ResponseWriter, r *http.Request) {
 		sources[1].Message = &msg
 	}
 
-	// Check BLS (employment)
-	if len(allData.EmploymentData) >= 8 {
+	// Check BLS: sectors must have >= 13 months for YoY growth calculation
+	blsTotal := len(allData.EmploymentData)
+	blsSufficient := 0
+	for _, ts := range allData.EmploymentData {
+		if len(ts.Values) >= 13 {
+			blsSufficient++
+		}
+	}
+
+	if blsTotal >= 8 && blsSufficient >= 8 {
 		sources[2].Status = "ok"
-		msg := fmt.Sprintf("%d sectors loaded", len(allData.EmploymentData))
+		msg := fmt.Sprintf("%d/%d sectors with sufficient history", blsSufficient, blsTotal)
 		sources[2].Message = &msg
-	} else if len(allData.EmploymentData) > 0 {
+	} else if blsTotal > 0 && blsSufficient > 0 {
 		sources[2].Status = "warning"
-		msg := fmt.Sprintf("Only %d sectors loaded", len(allData.EmploymentData))
+		msg := fmt.Sprintf("Only %d/%d sectors have 13+ months of data", blsSufficient, blsTotal)
+		sources[2].Message = &msg
+	} else if blsTotal > 0 {
+		sources[2].Status = "warning"
+		msg := fmt.Sprintf("%d sectors loaded but insufficient history for YoY growth", blsTotal)
 		sources[2].Message = &msg
 	} else {
 		sources[2].Status = "warning"
@@ -322,7 +368,7 @@ func GetDataQualityHandler(w http.ResponseWriter, r *http.Request) {
 		sources[2].Message = &msg
 	}
 
-	// Check Damodaran (R&D)
+	// Check Damodaran (R&D) - already validates non-zero values
 	nonZeroRD := 0
 	for _, v := range allData.RDData {
 		if v > 0 {
@@ -331,11 +377,11 @@ func GetDataQualityHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if nonZeroRD >= 8 {
 		sources[3].Status = "ok"
-		msg := fmt.Sprintf("%d sectors with R&D data", nonZeroRD)
+		msg := fmt.Sprintf("%d/%d sectors with R&D data", nonZeroRD, len(allData.RDData))
 		sources[3].Message = &msg
 	} else if nonZeroRD > 0 {
 		sources[3].Status = "warning"
-		msg := fmt.Sprintf("Only %d sectors with R&D data", nonZeroRD)
+		msg := fmt.Sprintf("Only %d/%d sectors with R&D data", nonZeroRD, len(allData.RDData))
 		sources[3].Message = &msg
 	} else {
 		sources[3].Status = "error"
